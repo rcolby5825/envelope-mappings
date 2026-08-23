@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/envelope_mappings/__init__.py
+src/envelope_mappings/classifier.py
+src/envelope_mappings/fingerprint.py
+src/envelope_mappings/logo.py
+src/envelope_mappings/results.py
+src/envelope_mappings/template.py
+src/envelope_mappings.egg-info/PKG-INFO
+src/envelope_mappings.egg-info/SOURCES.txt
+src/envelope_mappings.egg-info/dependency_links.txt
+src/envelope_mappings.egg-info/requires.txt
+src/envelope_mappings.egg-info/top_level.txt
+tests/test_package.py

@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package envelope_mappings.v1;
+
+option java_multiple_files = true;
+option java_package = "com.envelopemappings.v1";
+option java_outer_classname = "EnvelopeMappingsProto";
+
+import "google/protobuf/struct.proto";
+
+// Classifies an envelope image against the registered company and template
+// references. Images must be encoded PNG or JPEG bytes, not raw pixel arrays.
+service EnvelopeClassifierService {
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+}
+
+message ClassifyRequest {
+  bytes envelope_image = 1;
+
+  // Optional cropped logo image. When omitted, the service uses the envelope
+  // image for company identification.
+  bytes logo_region = 2;
+}
+
+message ClassifyResponse {
+  oneof result {
+    PatternRecord pattern_record = 1;
+    AmbiguousMatch ambiguous_match = 2;
+    NewTemplateNeeded new_template_needed = 3;
+  }
+}
+
+message PatternRecord {
+  string template_name = 1;
+  string company = 2;
+  optional int32 year_code = 3;
+  double confidence = 4;
+  google.protobuf.Struct fields = 5;
+}
+
+message AmbiguousMatch {
+  string company = 1;
+  repeated TemplateScore candidates = 2;
+}
+
+message NewTemplateNeeded {
+  enum Stage {
+    STAGE_UNSPECIFIED = 0;
+    COMPANY = 1;
+    TEMPLATE = 2;
+  }
+
+  Stage stage = 1;
+  repeated NamedScore closest_scores = 2;
+}
+
+message TemplateScore {
+  string template_name = 1;
+  optional int32 year_code = 2;
+  double score = 3;
+}
+
+message NamedScore {
+  string name = 1;
+  double score = 2;
+}
