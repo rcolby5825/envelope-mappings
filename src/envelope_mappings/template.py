@@ -19,17 +19,30 @@ Class naming convention (drives auto-derivation of `company`/`year_code`):
       only catch the first word) -- e.g.:
           class KwikSew1985(EnvelopeTemplate):
               company = "KwikSew"
-    - `year_code` auto-derives from the trailing digits. Override if a
-      template needs something other than a single anchor year (e.g. a
-      range) -- the attribute is a plain int by default but nothing here
-      enforces that; override the type too if needed.
+    - `year_code` auto-derives from the trailing digits and is used as a
+      single anchor/sort year -- kept as strictly-digits-only by design,
+      so classname parsing stays simple and unambiguous. For real
+      collection data, an exact year is often NOT known -- use
+      `year_range` (a separate, optional (start, end) tuple you set
+      explicitly) to express "somewhere in this span" without
+      complicating the classname convention at all.
+
+REFERENCE IMAGES ARE NOT PART OF THIS REPO. Real envelope photos/logo
+crops live wherever you keep them locally -- set a PATH via
+set_reference_path(), not the image data itself. Loading only happens
+the first time the reference is actually needed (lazily), so you can
+define a template and point it at a path before the file exists there
+yet, and add the real image whenever. set_reference() (with an in-memory
+array) still works too, e.g. for tests.
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from envelope_mappings.fingerprint import EnvelopeFingerprint
@@ -44,28 +57,19 @@ class EnvelopeTemplate:
     company: str | None = None
     year_code: int | None = None
 
+    # Optional, explicit -- set this when only a span is known, e.g.
+    #   class Pictorial1934(EnvelopeTemplate):
+    #       year_range = (1932, 1936)
+    # Purely informational: nothing here reads it for matching logic,
+    # it's just a place to record what you actually know.
+    year_range: tuple[int, int] | None = None
+
     # Fractional bounding boxes (0.0-1.0 of envelope width/height) per
     # field, and a validator per field -- both intentionally empty here.
     # Subclasses fill these in; the parent/classifier never reads them
     # directly except via extract_fields(), which subclasses implement.
     field_regions: dict[str, tuple[float, float, float, float]] = {}
     field_validators: dict[str, Callable[[str], bool]] = {}
-
-    # The reference fingerprint this template matches against. Not set at
-    # class-definition time -- a subclass instance needs a real reference
-    # envelope image to compute this from, so it's set explicitly via
-    # set_reference() once you have one (e.g. in __init__, or after
-    # construction). classify() will treat a template with no reference
-    # set as unable to match (score 0) rather than raising, so a
-    # half-finished template doesn't crash the whole classifier.
-    reference_fingerprint: EnvelopeFingerprint | None = None
-
-    def set_reference(self, reference_image: np.ndarray) -> None:
-        """Computes and stores this template's reference fingerprint from
-        a representative envelope image. Call this once per template
-        instance before using it in a classifier.
-        """
-        self.reference_fingerprint = self.fingerprint(reference_image)
 
     def __init__(self):
         if self.company is None or self.year_code is None:
@@ -75,11 +79,65 @@ class EnvelopeTemplate:
             if self.year_code is None:
                 self.year_code = derived_year
 
+        self._reference_fingerprint: EnvelopeFingerprint | None = None
+        self._reference_path: Path | None = None
+
     def _parse_classname(self) -> tuple[str, int | None]:
         match = _CLASSNAME_PATTERN.match(type(self).__name__)
         if not match:
             return type(self).__name__, None
         return match.group(1), int(match.group(2))
+
+    def set_reference(self, reference_image: np.ndarray) -> None:
+        """Computes and stores this template's reference fingerprint
+        immediately from an in-memory image. Use this for tests/synthetic
+        data; for real files use set_reference_path() instead, which
+        defers loading until actually needed.
+        """
+        self._reference_fingerprint = self.fingerprint(reference_image)
+        self._reference_path = None
+
+    def set_reference_path(self, path: str | Path) -> None:
+        """Points this template at a reference image file WITHOUT loading
+        it yet. The file doesn't need to exist at the time you call this
+        -- it's only read (and the fingerprint computed + cached) the
+        first time `reference_fingerprint` is actually accessed, e.g.
+        during classification. This lets you define and commit a template
+        class before you've placed the real image on disk.
+        """
+        self._reference_path = Path(path)
+        self._reference_fingerprint = None  # invalidate any previous cache
+
+    @property
+    def reference_fingerprint(self) -> EnvelopeFingerprint | None:
+        """None if no reference has been set at all yet (via either
+        method above). Raises FileNotFoundError -- not silently returns
+        None -- if a path WAS set but the file isn't there when actually
+        needed, so a missing image is loud and specific rather than
+        quietly scoring 0 like a template with no reference configured
+        at all would.
+        """
+        if self._reference_fingerprint is not None:
+            return self._reference_fingerprint
+
+        if self._reference_path is not None:
+            if not self._reference_path.exists():
+                raise FileNotFoundError(
+                    f"{type(self).__name__} reference image not found at "
+                    f"{self._reference_path} -- place the file there, or "
+                    f"call set_reference_path() with the correct location."
+                )
+            image = cv2.imread(str(self._reference_path))
+            if image is None:
+                raise ValueError(
+                    f"{type(self).__name__} reference image at "
+                    f"{self._reference_path} could not be read (corrupt "
+                    f"file or unsupported format?)."
+                )
+            self._reference_fingerprint = self.fingerprint(image)
+            return self._reference_fingerprint
+
+        return None
 
     def fingerprint(self, envelope: np.ndarray) -> EnvelopeFingerprint:
         """Default: the generic color/edge/text-layout fingerprint.
