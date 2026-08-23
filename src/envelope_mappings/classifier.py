@@ -14,6 +14,8 @@ Extending coverage is purely additive -- append to `logos` and
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from envelope_mappings.logo import CompanyLogo
@@ -43,11 +45,18 @@ class EnvelopeClassifier:
         if not self.logos:
             return NewTemplateNeeded(envelope, stage="company", closest_scores=None)
 
-        company_scores = sorted(
-            ((logo.company, logo.match_score(logo_region)) for logo in self.logos),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )
+        company_scores = []
+        for logo in self.logos:
+            try:
+                score = logo.match_score(logo_region)
+            except (FileNotFoundError, ValueError) as e:
+                # Same reasoning as the template loop below -- a logo
+                # pointed at a path that isn't populated yet shouldn't
+                # break classification against every OTHER company.
+                warnings.warn(f"CompanyLogo({logo.company!r}): {e}", stacklevel=2)
+                score = 0.0
+            company_scores.append((logo.company, score))
+        company_scores.sort(key=lambda pair: pair[1], reverse=True)
         best_company, logo_score = company_scores[0]
 
         if logo_score < LOGO_MIN_THRESHOLD:
@@ -63,8 +72,23 @@ class EnvelopeClassifier:
 
         scores = []
         for template in candidates:
-            if template.reference_fingerprint is None:
-                # Template exists but has no reference image set yet --
+            try:
+                ref_fp = template.reference_fingerprint
+            except (FileNotFoundError, ValueError) as e:
+                # A path was set via set_reference_path() but the file
+                # isn't there (or isn't readable) yet -- treat the same
+                # as "no reference configured" for scoring purposes, so
+                # one incomplete template doesn't break classification
+                # for the rest of its company. Not silent, though -- a
+                # warning surfaces this rather than hiding it entirely.
+                warnings.warn(
+                    f"{type(template).__name__}: {e}", stacklevel=2
+                )
+                scores.append((template, 0.0))
+                continue
+
+            if ref_fp is None:
+                # Template exists but has no reference set at all yet --
                 # can't match against it. Scored 0 rather than raising,
                 # so one half-finished template doesn't break
                 # classification of everything else in its company.
@@ -76,9 +100,7 @@ class EnvelopeClassifier:
             # both sides of the comparison need to go through that same
             # logic for the distance to mean anything.
             envelope_fp = template.fingerprint(envelope)
-            scores.append(
-                (template, template.reference_fingerprint.distance(envelope_fp))
-            )
+            scores.append((template, ref_fp.distance(envelope_fp)))
         scores.sort(key=lambda pair: pair[1], reverse=True)
         best_template, best_score = scores[0]
 

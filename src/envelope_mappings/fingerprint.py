@@ -72,22 +72,37 @@ class EnvelopeFingerprint:
         """Returns a similarity score in [0, 1] -- 1.0 = identical, not a
         true distance despite the name (kept for readability at call
         sites: `fingerprint.distance(other)` reads as "how well does this
-        match other"). Combines the three components with equal weight;
-        TODO once there's real data to tune against, these weights may
-        want adjusting -- e.g. text_layout may deserve more weight than
-        color if two companies happen to share a palette.
+        match other").
 
-        IMPORTANT, found via testing on two real, genuinely different
-        envelopes: comparing edge_map/text_layout via mean-absolute-
-        difference scored them as ~0.80-0.93 similar even though they're
-        different companies entirely. Both maps are mostly blank (sparse
-        content on a mostly-empty page), so elementwise mean-abs-diff is
-        dominated by both images trivially "agreeing" on blank regions,
-        drowning out the real signal in the sparse content that actually
-        differs. Switched to correlation (same approach already used for
-        color_hist) instead -- confirmed on the same real pair that this
-        correctly drops the cross-company score to ~0.25 while a self-
-        match still scores a perfect 1.0.
+        WEIGHTS ARE NOT EQUAL, found via testing on real data in two
+        stages:
+
+        1. Comparing edge_map/text_layout via mean-absolute-difference
+           scored two genuinely different companies as ~0.80-0.93
+           similar (both maps are mostly blank, so elementwise diff is
+           dominated by trivial agreement on blank regions). Fixed by
+           switching to correlation, same approach already used for
+           color_hist -- see _correlation_sim().
+
+        2. Even with correlation, equal-weighting still had a real
+           problem: a single JPEG re-save of the SAME envelope (an
+           unavoidable, routine part of any real file-based workflow)
+           dropped the combined score from 1.0 to 0.72 -- BELOW
+           HIGH_THRESHOLD, meaning literally the same photo would fail
+           to match itself after one lossy save. Root cause: layout_sim
+           (built on OCR text-block detection) is far noisier than
+           color/edge under small compression artifacts -- confirmed at
+           0.20 similarity for the same envelope, vs. 0.97-0.999 for
+           edge/color on the identical comparison. text_layout still
+           carries real discriminating value between different companies
+           (confirmed near 0.0 for two different real companies), so
+           it's down-weighted rather than dropped -- just not trusted as
+           much as the other two, more stable signals.
+
+        These specific weights (0.45/0.45/0.10) are calibrated against
+        exactly the two real envelopes used during development, not a
+        larger validated sample -- revisit once more real templates
+        exist to test against.
         """
         color_sim = cv2.compareHist(
             self.color_hist, other.color_hist, cv2.HISTCMP_CORREL
@@ -97,7 +112,7 @@ class EnvelopeFingerprint:
         edge_sim = _correlation_sim(self.edge_map, other.edge_map)
         layout_sim = _correlation_sim(self.text_layout, other.text_layout)
 
-        return float((color_sim + edge_sim + layout_sim) / 3.0)
+        return float(0.45 * color_sim + 0.45 * edge_sim + 0.10 * layout_sim)
 
 
 def _compute_color_hist(image_bgr: np.ndarray) -> np.ndarray:
