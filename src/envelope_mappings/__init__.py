@@ -5,13 +5,20 @@ narrows to a company, then a combined visual fingerprint (color, edge/
 layout, text-block positions) narrows to a specific year-variant
 template, which then extracts fields from its own known regions.
 
-See classifier.py, template.py, logo.py, fingerprint.py, results.py.
+See classifier.py, template.py, logo.py, fingerprint.py, results.py,
+extraction.py.
 """
 
 from envelope_mappings.classifier import EnvelopeClassifier
+from envelope_mappings.extraction import FieldExtractor, extractor
 from envelope_mappings.fingerprint import EnvelopeFingerprint
 from envelope_mappings.logo import CompanyLogo
-from envelope_mappings.results import AmbiguousMatch, NewTemplateNeeded, PatternRecord
+from envelope_mappings.results import (
+    AmbiguousMatch,
+    FieldResult,
+    NewTemplateNeeded,
+    PatternRecord,
+)
 from envelope_mappings.template import EnvelopeTemplate
 
 __version__ = "0.1.0"
@@ -21,7 +28,10 @@ __all__ = [
     "EnvelopeTemplate",
     "EnvelopeFingerprint",
     "CompanyLogo",
+    "FieldExtractor",
+    "extractor",
     "PatternRecord",
     "AmbiguousMatch",
     "NewTemplateNeeded",
+    "FieldResult",
 ]

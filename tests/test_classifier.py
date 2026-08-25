@@ -371,5 +371,148 @@ class ExtendViaAppendTests(unittest.TestCase):
         self.assertEqual(result2.company, "KwikSew")
 
 
+class ExtractFieldsTests(unittest.TestCase):
+    """Covers the generic field-extraction mechanism -- crop, OCR,
+    validate -- confirmed against real synthetic field content during
+    development, including a real bug this caught: a blank region's
+    stray-noise detections leaking through as a spurious low-confidence
+    token unless explicitly filtered.
+    """
+
+    def _make_field_envelope(self) -> np.ndarray:
+        img = np.ones((960, 540, 3), dtype=np.uint8) * 255
+        cv2.putText(
+            img, "PATTERN 7117", (30, 100),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2,
+        )
+        cv2.putText(
+            img, "SIZE 16", (30, 200),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2,
+        )
+        return img
+
+    def test_empty_field_regions_returns_empty_dict(self):
+        class NoRegionsTemplate(EnvelopeTemplate):
+            def extract_fields(self, envelope):
+                return EnvelopeTemplate.extract_fields(self, envelope)
+
+        t = NoRegionsTemplate()
+        self.assertEqual(t.extract_fields(self._make_field_envelope()), {})
+
+    def test_field_with_no_validator_has_valid_none(self):
+        class OneFieldTemplate(EnvelopeTemplate):
+            field_regions = {"pattern_number": (0.0, 0.06, 0.6, 0.14)}
+
+        t = OneFieldTemplate()
+        results = t.extract_fields(self._make_field_envelope())
+        self.assertIn("PATTERN", results["pattern_number"].value)
+        self.assertIsNone(results["pattern_number"].valid)
+        self.assertGreater(results["pattern_number"].confidence, 50)
+
+    def test_field_with_passing_validator(self):
+        class ValidatedTemplate(EnvelopeTemplate):
+            field_regions = {"pattern_number": (0.0, 0.06, 0.6, 0.14)}
+            field_validators = {"pattern_number": lambda v: "PATTERN" in v}
+
+        t = ValidatedTemplate()
+        results = t.extract_fields(self._make_field_envelope())
+        self.assertTrue(results["pattern_number"].valid)
+
+    def test_field_with_failing_validator(self):
+        class StrictTemplate(EnvelopeTemplate):
+            field_regions = {"pattern_number": (0.0, 0.06, 0.6, 0.14)}
+            # will fail -- the crop contains "PATTERN 7117", not pure digits
+            field_validators = {"pattern_number": lambda v: v.isdigit()}
+
+        t = StrictTemplate()
+        results = t.extract_fields(self._make_field_envelope())
+        self.assertFalse(results["pattern_number"].valid)
+        # value is still reported even though it failed validation --
+        # surfaced for review, not silently dropped
+        self.assertIn("PATTERN", results["pattern_number"].value)
+
+    def test_blank_region_yields_empty_value_and_none_confidence(self):
+        class BlankFieldTemplate(EnvelopeTemplate):
+            field_regions = {"nothing_here": (0.7, 0.7, 0.99, 0.99)}
+
+        t = BlankFieldTemplate()
+        results = t.extract_fields(self._make_field_envelope())
+        self.assertEqual(results["nothing_here"].value, "")
+        self.assertIsNone(results["nothing_here"].confidence)
+        self.assertIsNone(results["nothing_here"].valid)
+
+    def test_multiple_fields_extracted_independently(self):
+        class TwoFieldTemplate(EnvelopeTemplate):
+            field_regions = {
+                "pattern_number": (0.0, 0.06, 0.6, 0.14),
+                "size": (0.0, 0.16, 0.4, 0.24),
+            }
+
+        t = TwoFieldTemplate()
+        results = t.extract_fields(self._make_field_envelope())
+        self.assertEqual(set(results.keys()), {"pattern_number", "size"})
+        self.assertIn("PATTERN", results["pattern_number"].value)
+        self.assertIn("SIZE", results["size"].value)
+
+
+class FieldExtractorTests(unittest.TestCase):
+    """Direct coverage of FieldExtractor as its own standalone unit, now
+    that it's decoupled from EnvelopeTemplate -- confirms the singleton
+    is genuinely shared, and that it works correctly when called
+    directly rather than only via a template's extract_fields().
+    """
+
+    def test_singleton_is_the_same_instance_everywhere(self):
+        from envelope_mappings.extraction import extractor as extractor_a
+        from envelope_mappings.extraction import extractor as extractor_b
+
+        self.assertIs(extractor_a, extractor_b)
+
+    def test_template_extract_fields_uses_the_shared_singleton(self):
+        from envelope_mappings.extraction import extractor
+
+        img = np.ones((960, 540, 3), dtype=np.uint8) * 255
+        cv2.putText(
+            img, "PATTERN 7117", (30, 100),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2,
+        )
+
+        class DelegatingTemplate(EnvelopeTemplate):
+            field_regions = {"pattern_number": (0.0, 0.06, 0.6, 0.14)}
+
+        t = DelegatingTemplate()
+        via_template = t.extract_fields(img)
+        via_singleton_directly = extractor.extract(t, img)
+
+        self.assertEqual(
+            via_template["pattern_number"].value,
+            via_singleton_directly["pattern_number"].value,
+        )
+
+    def test_custom_extractor_can_override_confidence_threshold(self):
+        from envelope_mappings.extraction import FieldExtractor
+
+        class StrictExtractor(FieldExtractor):
+            MIN_FIELD_OCR_CONFIDENCE = 99  # unreasonably strict on purpose
+
+        img = np.ones((960, 540, 3), dtype=np.uint8) * 255
+        cv2.putText(
+            img, "PATTERN 7117", (30, 100),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2,
+        )
+
+        class StrictTemplate(EnvelopeTemplate):
+            field_regions = {"pattern_number": (0.0, 0.06, 0.6, 0.14)}
+
+            def extract_fields(self, envelope):
+                return StrictExtractor().extract(self, envelope)
+
+        t = StrictTemplate()
+        results = t.extract_fields(img)
+        # threshold set high enough that even a clean detection gets
+        # filtered out -- confirms the override actually takes effect
+        self.assertEqual(results["pattern_number"].value, "")
+
+
 if __name__ == "__main__":
     unittest.main()
