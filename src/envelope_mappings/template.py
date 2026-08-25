@@ -3,8 +3,10 @@ year-variant.
 
 The parent owns IDENTIFICATION mechanics only (thresholds, company/year
 parsing from the class name). It has zero company-specific knowledge.
-Subclasses own EXTRACTION only (field_regions, field_validators,
-extract_fields()) -- the parent never touches those.
+Subclasses own EXTRACTION CONFIGURATION only (field_regions,
+field_validators) -- the actual extraction MECHANISM lives in its own
+module, extraction.py, as a standalone FieldExtractor -- see that
+module's docstring for why it's kept separate.
 
 Extending coverage for a new company or era is purely additive: define a
 subclass, append an instance to the classifier's `templates` list (and a
@@ -45,7 +47,9 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from envelope_mappings.extraction import extractor
 from envelope_mappings.fingerprint import EnvelopeFingerprint
+from envelope_mappings.results import FieldResult
 
 _CLASSNAME_PATTERN = re.compile(r"^([A-Za-z]+?)(\d+)$")
 
@@ -66,8 +70,8 @@ class EnvelopeTemplate:
 
     # Fractional bounding boxes (0.0-1.0 of envelope width/height) per
     # field, and a validator per field -- both intentionally empty here.
-    # Subclasses fill these in; the parent/classifier never reads them
-    # directly except via extract_fields(), which subclasses implement.
+    # Subclasses fill these in as DATA; the actual extraction mechanism
+    # that reads them lives in extraction.py, not here.
     field_regions: dict[str, tuple[float, float, float, float]] = {}
     field_validators: dict[str, Callable[[str], bool]] = {}
 
@@ -146,14 +150,15 @@ class EnvelopeTemplate:
         """
         return EnvelopeFingerprint.compute(envelope)
 
-    def extract_fields(self, envelope: np.ndarray) -> dict:
-        """Must be implemented per subclass -- uses this template's own
-        field_regions/field_validators. The parent/classifier never
-        calls this until a match has already cleared HIGH_THRESHOLD.
+    def extract_fields(self, envelope: np.ndarray) -> dict[str, FieldResult]:
+        """Delegates to the shared FieldExtractor singleton (see
+        extraction.py) -- this template only supplies field_regions/
+        field_validators as data. Override this method instead if a
+        specific template needs a genuinely different extraction
+        mechanism (e.g. a dedicated FieldExtractor with different OCR
+        settings) rather than just different field data.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement extract_fields()"
-        )
+        return extractor.extract(self, envelope)
 
     def __repr__(self) -> str:
         return (
