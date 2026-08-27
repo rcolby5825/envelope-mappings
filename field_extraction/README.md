@@ -8,17 +8,25 @@ envelope photos before copying confirmed values into
 ## Files
 
 - `field_regions.py` — DATA ONLY. `FieldRegion`/`EnvelopeFieldMap`
-  dataclasses, no methods beyond a trivial `.get()` lookup. Currently
-  covers two reference envelopes: Excella E3415 and Pictorial 7117,
-  both front and back.
+  dataclasses, plus a `find_field_map()` lookup (see "Testing photos
+  beyond the exact reference envelope" below). Currently covers two
+  reference envelopes: Excella E3415 and Pictorial 7117, both front
+  and back.
 - `extractor.py` — the extraction MECHANISM (rotation detection, crop,
   OCR), kept separate from the data above, same split as the
   production package's `template.py`/`extraction.py`.
+- `cleanup_rules.py` — DATA ONLY. Regex find/replace rules for
+  recurring OCR mistakes, keyed by field name. Edit this directly to
+  add a rule; see "Cleaning up OCR output" below.
+- `cleanup.py` — the MECHANISM that applies `cleanup_rules.py`'s
+  patterns. Kept separate from that data for the same reason as
+  everything else here.
 - `run_test.py` — CLI you run by hand to test a field map against a
-  photo; prints results and persists them via `storage.py`.
+  photo; prints results (raw + cleaned) and persists them via
+  `storage.py`.
 - `webapp.py` — local browser UI over the same mechanism as
   `run_test.py`, for adding/testing photos without typing CLI args.
-  Pick the envelope from a dropdown, upload the photo, submit. Not
+  Pick a template from a dropdown, upload the photo, submit. Not
   installed as part of the package; requires `flask` (not a real
   package dependency, install it directly — see below).
 - `storage.py` — shared persistence for both front doors above. Writes
@@ -32,6 +40,56 @@ envelope photos before copying confirmed values into
   same treatment as `results/`). `run_test.py` doesn't use this
   directory — it reads whatever path you pass it directly.
 
+## Testing photos beyond the exact reference envelope
+
+Every field map was measured against ONE specific reference photo
+(Excella E3415, Pictorial 7117), but the whole point of a template is
+that the same bboxes should work reasonably well on OTHER envelopes
+from that company with a similar layout — a different Excella pattern
+number, for instance, not just E3415 itself.
+
+Both the CLI and the browser UI support this: `find_field_map()` in
+`field_regions.py` tries an exact `(company, pattern_number, side)`
+match first, and if that fails, falls back to any template for the
+same `(company, side)` — the closest thing available, regardless of
+its own reference pattern number. Both front doors flag clearly when
+this fallback kicks in:
+
+- CLI: prints `using Excella/E3415's regions as the closest template
+  -- no exact match for this pattern number`
+- Browser: shows a blue info banner with the same message
+
+This is a genuine "best effort, not guaranteed" situation — a
+template's bboxes might not line up as tightly on a photo they weren't
+measured against (different year, different print layout, a different
+photo crop). Worth treating fallback results with a bit more scrutiny
+than exact-match ones, especially on a company/side you haven't tested
+a second envelope of before.
+
+If more than one template ever exists for the same `(company, side)` —
+not the case yet, but plausible once a company has multiple
+genuinely-different-era layouts (McCall's 6600 vs 8306 were like this
+in earlier testing) — `find_field_map()` picks whichever one it finds
+first, with no attempt to guess which fits best. That's a known
+simplification; if it matters later it needs explicit selection, not a
+silent guess.
+
+## Cleaning up OCR output
+
+`cleanup_rules.py` holds regex find/replace rules, keyed by field name
+(or `"*"` for a rule applied to every field), applied via
+`cleanup.clean_value()`. It ships with one confirmed-working example —
+Excella's `pattern_number` reliably gets a stray leading `[` from
+tesseract, which a rule there strips.
+
+Add a rule once you notice OCR making the SAME mistake more than
+once — not for a one-off misread. Both front doors show the *cleaned*
+value as the primary one, with the *raw* value alongside only when
+cleanup actually changed something, and persist both to `results.jsonl`
+/ SQLite so nothing is silently lost to a bad rule. A pattern that
+fails to compile is skipped with a printed warning rather than crashing
+the run.
+
 ## Usage — command line
 
 ```
@@ -40,16 +98,10 @@ envelope photos before copying confirmed values into
     /path/to/excella_E3415_front.jpg Excella E3415 front
 ```
 
-Positional args are `image_path company pattern_number side`. Both
-`company` and `pattern_number` must match a key in
-`ENVELOPE_FIELD_MAPS` (case-sensitive) — currently `Excella`/`E3415`
-or `Pictorial`/`7117`, each with `side` `front` or `back`.
-
-The `(company, pattern_number, side)` key (rather than just
-`(company, side)`) is deliberate: a single company can have multiple
-reference envelopes with different layouts, so company+side alone
-isn't a safe unique key even though both companies here currently have
-just one reference envelope each.
+Positional args are `image_path company pattern_number side`.
+`pattern_number` is the ACTUAL number on the photo you're testing — it
+does not need to match a reference envelope exactly; see "Testing
+photos beyond the exact reference envelope" above.
 
 Rotation is auto-detected per photo — no flag needed. Add
 `--force-rotation {0,90,180,270}` only if detection gets a specific
@@ -74,13 +126,16 @@ FIELD_EXTRACTION_DB_PATH
   `results/results.jsonl` instead. This is the default, works with
   zero configuration.
 
-Either way, the record shape is the same: `company`, `pattern_number`,
+Either way, the record shape is the same: `company`, `pattern_number`
+(the actual one on the photo), `template_pattern_number` (which
+reference template's regions were actually used), `is_exact_template`,
 `side`, `image` (path), `rotation_applied_degrees`, `rotation_source`,
-`results` (the full per-field dict), plus a `created_at` timestamp
-`storage.py` adds automatically. In the SQLite case, `results` is
-stored as a JSON-encoded `results_json` column — quick to query the
-top-level columns directly, quick to load the full field detail back
-out with `json.loads()`.
+`results` (the full per-field dict, each entry including both `value`
+and `cleaned_value`), plus a `created_at` timestamp `storage.py` adds
+automatically. In the SQLite case, `results` is stored as a
+JSON-encoded `results_json` column — quick to query the top-level
+columns directly, quick to load the full field detail back out with
+`json.loads()`.
 
 Switching the env var mid-session is fine — the CLI and the browser
 both just check `os.environ` at save time, nothing is cached. Older
@@ -101,13 +156,22 @@ Then run the server (this part still needs a terminal, once):
 ~/envelope_env/bin/python field_extraction/webapp.py
 ```
 
-Open `http://127.0.0.1:5151` in a browser. Pick the envelope from the
-dropdown (same `(company, pattern_number, side)` combos as the CLI),
-choose a photo file, hit submit. Results render as a table with the
-same value/confidence data the CLI prints, plus a preview of the
-rotated image and a low-confidence warning banner if every field came
-back weak (usually means the wrong rotation was applied — the banner
-suggests the 180°-opposite to try via the "Force rotation" dropdown).
+Open `http://127.0.0.1:5151` in a browser. Pick a template from the
+dropdown (grouped by company + side, not tied to an exact pattern
+number — see "Testing photos beyond the exact reference envelope"
+above), optionally type in the actual pattern number printed on your
+photo, choose the file, hit submit. Results render as:
+
+- A table of cleaned values (raw shown underneath only where cleanup
+  actually changed something), with the same confidence color-coding
+  the CLI's numbers imply.
+- A preview of the rotated image.
+- A low-confidence warning banner if every field came back weak
+  (usually means the wrong rotation was applied — the banner suggests
+  the 180°-opposite to try via the "Force rotation" dropdown).
+- A collapsible "Raw result (JSON)" block with the complete
+  unformatted result — the same shape that gets persisted — for
+  copy-pasting or a closer look.
 
 Every submission is saved through the same `storage.save_result()`
 that `run_test.py` uses (see "Persistence" above), so both front doors
