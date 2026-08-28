@@ -152,3 +152,48 @@ ENVELOPE_FIELD_MAPS: dict[tuple[str, str, str], EnvelopeFieldMap] = {
     ("Pictorial", "7117", "front"): PICTORIAL_7117_FRONT,
     ("Pictorial", "7117", "back"): PICTORIAL_7117_BACK,
 }
+
+
+def find_field_map(
+    company: str, pattern_number: str, side: str
+) -> tuple[EnvelopeFieldMap | None, bool]:
+    """Looks up a field map for (company, pattern_number, side).
+
+    Tries an exact match first. If that fails, falls back to ANY field
+    map for the same (company, side) regardless of pattern_number --
+    the whole point of measuring bboxes against one reference envelope
+    (e.g. Excella E3415) is that the SAME visual template should apply
+    to other envelopes from that company with a similar layout, even
+    though their actual pattern number is different (e.g. an Excella
+    E5000 photo). Requiring an exact pattern_number match would defeat
+    that -- every new envelope would need its own from-scratch
+    measurement even when an existing template already fits.
+
+    Returns (field_map, was_exact_match). field_map is None if nothing
+    matches even by company+side. was_exact_match tells the caller
+    whether the returned map was actually measured against this exact
+    pattern_number, or is a same-company/side template being reused for
+    a different envelope -- worth surfacing to whoever's reading
+    results, since a reused template's bboxes aren't guaranteed to line
+    up as tightly on a photo they weren't measured against (different
+    printing layout across years, a slightly different photo crop,
+    etc).
+
+    If more than one template exists for the same (company, side) --
+    not the case yet for anything in ENVELOPE_FIELD_MAPS, but plausible
+    once a company has multiple genuinely different-era layouts, the
+    way McCall's 6600 and 8306 did in earlier testing -- this returns
+    whichever one happens to be found first. No attempt is made to
+    guess which template fits a new photo best; if that distinction
+    ever matters, it needs its own explicit selection, not a silent
+    guess here.
+    """
+    exact = ENVELOPE_FIELD_MAPS.get((company, pattern_number, side))
+    if exact is not None:
+        return exact, True
+
+    for (map_company, _map_pattern, map_side), field_map in ENVELOPE_FIELD_MAPS.items():
+        if map_company == company and map_side == side:
+            return field_map, False
+
+    return None, False
