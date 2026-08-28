@@ -55,30 +55,26 @@ you want to stop the server.
 
 ## 4. Using it
 
-1. **Pick a template** from the dropdown — this is grouped by company
-   and side, not tied to one specific reference envelope, so any
-   Excella or Pictorial photo can use it (e.g. "Excella — front
-   (regions measured from E3415)" works for an E3415 photo just as
-   well as some other Excella pattern number).
+1. **Choose a photo file** from your computer — any Excella or
+   Pictorial pattern envelope, front or back. You don't need to know
+   which company it is or select anything — that's auto-detected.
 2. **Pattern number on this actual envelope** (optional) — type in
-   what's actually printed on the photo you're uploading. Leave it
-   blank if you don't know or it doesn't matter for this test. If you
-   type something that doesn't match the template's own reference
-   number, you'll see a blue info banner confirming it fell back to
-   the closest available template rather than an exact match — that's
-   expected, not an error.
-3. **Choose a photo file** from your computer.
-4. Leave **Rotation** on "Auto-detect" unless you already know a
+   what's actually printed on the photo, purely for the log. Leave it
+   blank if you don't know it; auto-detection doesn't use this field
+   at all.
+3. Leave **Rotation** on "Auto-detect" unless you already know a
    specific photo needs a forced rotation.
-5. Click **Extract fields**.
+4. Click **Extract fields**.
 
 You'll land on a results page showing:
 
-- A table of every field for that envelope side, with its *cleaned*
-  value (see `cleanup_rules.py` in `README.md`) and a confidence score
-  (green = solid, amber = shaky, gray = nothing detected). If cleanup
-  actually changed something, the original raw OCR text shows in gray
-  underneath.
+- A blue banner confirming what got auto-detected (e.g. "Excella /
+  front") and how confident that detection was.
+- A table of every field for that envelope side, with BOTH its raw OCR
+  value and its cleaned value (see `cleanup_rules.py`, covered in
+  `README.md`) shown side by side, always — not just when they differ
+  — plus a confidence score (green = solid, amber = shaky, gray =
+  nothing detected).
 - A preview of the photo as the tool actually saw it, rotation
   applied — useful for a quick gut-check on whether it landed upright.
 - A warning banner if every field came back weak, with a suggested
