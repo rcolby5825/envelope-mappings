@@ -197,3 +197,25 @@ def find_field_map(
             return field_map, False
 
     return None, False
+
+
+def list_templates() -> list[tuple[str, str, str, EnvelopeFieldMap]]:
+    """Every unique (company, side) template available, each paired
+    with which pattern_number's regions it was measured from and the
+    EnvelopeFieldMap itself. Used by classify.py to try each template
+    against a photo and see which one actually fits (see that module's
+    docstring), instead of asking the person to pick one from a
+    dropdown.
+
+    If ENVELOPE_FIELD_MAPS ever has more than one pattern_number for
+    the same (company, side), only the first one encountered is
+    included here -- same simplification as find_field_map's fallback,
+    for the same reason (no case requiring the distinction exists yet).
+    """
+    seen: dict[tuple[str, str], tuple[str, EnvelopeFieldMap]] = {}
+    for (company, pattern_number, side), field_map in ENVELOPE_FIELD_MAPS.items():
+        seen.setdefault((company, side), (pattern_number, field_map))
+    return [
+        (company, side, pattern_number, field_map)
+        for (company, side), (pattern_number, field_map) in seen.items()
+    ]

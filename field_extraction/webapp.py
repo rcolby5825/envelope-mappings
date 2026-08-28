@@ -1,7 +1,8 @@
-"""Local web UI for field_extraction -- upload a photo and pick an
-envelope from a dropdown instead of typing CLI args each time. Same
-underlying mechanism as run_test.py (extractor.py, field_regions.py);
-this is just a different front door onto it. NOT part of the installed
+"""Local web UI for field_extraction -- upload a photo and let it
+auto-detect which company/side template fits, instead of typing CLI
+args or picking from a dropdown. Same underlying mechanism as
+run_test.py (extractor.py, field_regions.py, classify.py); this is
+just a different front door onto it. NOT part of the installed
 envelope_mappings package.
 
 One-time setup (Flask isn't a dependency of the real package, so it's
@@ -13,16 +14,15 @@ Run it:
 
     ~/envelope_env/bin/python field_extraction/webapp.py
 
-Then open http://127.0.0.1:5151 in a browser. Pick which envelope the
-photo is of, upload the file, submit -- no command line needed for the
-day-to-day "test a new photo" workflow after the server is running.
-Uploaded photos are saved to field_extraction/uploads/ (gitignored,
-same treatment as the reference photos themselves). Results are
-persisted via storage.save_result() -- to a SQLite DB if
-FIELD_EXTRACTION_DB_PATH is set in the environment, otherwise appended
-to field_extraction/results/results.jsonl -- so this and run_test.py's
-CLI share the same result history either way. See storage.py's
-docstring for details.
+Then open http://127.0.0.1:5151 in a browser. Upload a photo of any
+Excella or Pictorial pattern envelope (front or back) -- which
+template applies is detected automatically (see classify.py), not
+chosen from a dropdown. Uploaded photos are saved to
+field_extraction/uploads/ (gitignored, same treatment as the reference
+photos themselves) and results are persisted via storage.save_result()
+-- to a SQLite DB if FIELD_EXTRACTION_DB_PATH is set in the
+environment, otherwise appended to field_extraction/results/results.jsonl.
+See storage.py's docstring for details.
 """
 
 from __future__ import annotations
@@ -36,13 +36,10 @@ import cv2
 from flask import Flask, abort, render_template_string, request
 
 sys.path.insert(0, str(Path(__file__).parent))
+from classify import auto_classify  # noqa: E402
 from cleanup import clean_value  # noqa: E402
-from extractor import (  # noqa: E402
-    _ROTATION_TO_CV2,
-    apply_detected_rotation,
-    extract_field_map,
-)
-from field_regions import ENVELOPE_FIELD_MAPS, find_field_map  # noqa: E402
+from extractor import _ROTATION_TO_CV2, apply_detected_rotation  # noqa: E402
+from field_regions import list_templates  # noqa: E402
 from storage import save_result  # noqa: E402
 
 UPLOADS_DIR = Path(__file__).parent / "uploads"
@@ -51,7 +48,7 @@ app = Flask(__name__)
 
 PAGE_STYLE = """
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #222; }
   h1 { font-size: 1.4rem; }
   label { display: block; margin-top: 1.2rem; font-weight: 600; }
   .hint { font-weight: 400; color: #666; font-size: .85em; }
@@ -64,7 +61,9 @@ PAGE_STYLE = """
   .conf-low { color: #b35900; }
   .conf-none { color: #999; }
   .note { font-size: .85em; color: #999; }
-  .raw { font-size: .85em; color: #999; }
+  .raw-col { color: #555; font-family: ui-monospace, monospace; font-size: .9em; }
+  .cleaned-col { font-weight: 600; }
+  .unchanged { color: #999; font-weight: 400; }
   img.preview { max-width: 100%; margin-top: 1rem; border: 1px solid #ccc; }
   .warning { background: #fff3cd; border: 1px solid #ffe69c; padding: .8rem; margin-top: 1rem; border-radius: 4px; }
   .info { background: #e7f1ff; border: 1px solid #c3ddff; padding: .8rem; margin-top: 1rem; border-radius: 4px; }
@@ -80,21 +79,14 @@ FORM_TEMPLATE = f"""
 <title>field_extraction</title>
 {PAGE_STYLE}
 <h1>Test an envelope photo</h1>
+<p class=hint>Which company/side template applies is auto-detected from the photo -- see classify.py.</p>
 <form method=post action="/extract" enctype=multipart/form-data>
-  <label>Which template should this photo use?
-    <span class=hint>(the company/side determines which field regions apply -- doesn't need to be the exact reference envelope)</span>
-    <select name=template required>
-      {{% for c, s, p in templates %}}
-        <option value="{{{{ c }}}}|{{{{ s }}}}">{{{{ c }}}} &mdash; {{{{ s }}}} <span class=hint>(regions measured from {{{{ p }}}})</span></option>
-      {{% endfor %}}
-    </select>
-  </label>
-  <label>Pattern number on this actual envelope
-    <span class=hint>(optional -- what's printed on the photo you're uploading, if different from the template)</span>
-    <input type=text name=actual_pattern_number placeholder="e.g. E5000, or leave blank">
-  </label>
   <label>Photo
     <input type=file name=photo accept="image/*" required>
+  </label>
+  <label>Pattern number on this actual envelope
+    <span class=hint>(optional -- what's printed on the photo, for the log; doesn't affect detection)</span>
+    <input type=text name=actual_pattern_number placeholder="e.g. E5000, or leave blank">
   </label>
   <label>Rotation
     <select name=force_rotation>
@@ -109,15 +101,15 @@ FORM_TEMPLATE = f"""
 </form>
 """
 
-NO_COMBOS_TEMPLATE = f"""
+NO_TEMPLATES_TEMPLATE = f"""
 <!doctype html>
 <title>field_extraction</title>
 {PAGE_STYLE}
 <h1>Test an envelope photo</h1>
 <div class=warning>
-  <strong>No envelopes defined yet.</strong> ENVELOPE_FIELD_MAPS in
+  <strong>No templates defined yet.</strong> ENVELOPE_FIELD_MAPS in
   field_regions.py is empty -- add at least one EnvelopeFieldMap before
-  there's anything to test a photo against.
+  there's anything to auto-detect or test a photo against.
 </div>
 """
 
@@ -126,16 +118,17 @@ RESULT_TEMPLATE = f"""
 <title>field_extraction — results</title>
 {PAGE_STYLE}
 <h1>{{{{ company }}}} {{{{ display_pattern_number }}}} &mdash; {{{{ side }}}}</h1>
-{{% if not is_exact_template %}}<div class=info>Using {{{{ company }}}}/{{{{ template_pattern_number }}}}'s regions as the closest template for this company/side -- no exact match for this photo's pattern number.</div>{{% endif %}}
+<div class=info>Auto-detected as <strong>{{{{ company }}}} / {{{{ side }}}}</strong> (classification confidence: {{{{ classify_confidence }}}}).</div>
 <p>rotation applied: <strong>{{{{ rotation_applied }}}}&deg;</strong> ({{{{ rotation_source }}}})</p>
 {{% if warning %}}<div class=warning>{{{{ warning }}}}</div>{{% endif %}}
 <table>
-  <tr><th>Field</th><th>Confidence</th><th>Cleaned value</th></tr>
+  <tr><th>Field</th><th>Confidence</th><th>Raw OCR value</th><th>Cleaned value</th></tr>
   {{% for name, r in results.items() %}}
   <tr>
     <td>{{{{ name }}}}{{% if r.note %}}<br><span class=note>{{{{ r.note }}}}</span>{{% endif %}}</td>
     <td class="{{{{ r.conf_class }}}}">{{{{ r.conf_display }}}}</td>
-    <td>{{{{ r.cleaned_value }}}}{{% if r.cleaned_value != r.raw_value %}}<br><span class=raw>raw: {{{{ r.raw_value }}}}</span>{{% endif %}}</td>
+    <td class=raw-col>{{{{ r.raw_value }}}}</td>
+    <td class="{{{{ 'cleaned-col' if r.raw_value != r.cleaned_value else 'unchanged' }}}}">{{{{ r.cleaned_value }}}}</td>
   </tr>
   {{% endfor %}}
 </table>
@@ -157,66 +150,15 @@ def _confidence_display(confidence: float | None) -> tuple[str, str]:
     return f"{confidence:.0f}", "conf-low"
 
 
-def _template_choices() -> list[tuple[str, str, str]]:
-    """Unique (company, side) combos available to test against, each
-    labeled with which pattern_number's regions they were measured
-    from. Sorted for a stable dropdown order.
-    """
-    seen: dict[tuple[str, str], str] = {}
-    for company, pattern_number, side in sorted(ENVELOPE_FIELD_MAPS.keys()):
-        seen.setdefault((company, side), pattern_number)
-    return [(company, side, pattern_number) for (company, side), pattern_number in seen.items()]
-
-
 @app.route("/")
 def index():
-    templates = _template_choices()
-    if not templates:
-        return render_template_string(NO_COMBOS_TEMPLATE)
-    return render_template_string(FORM_TEMPLATE, templates=templates)
+    if not list_templates():
+        return render_template_string(NO_TEMPLATES_TEMPLATE)
+    return render_template_string(FORM_TEMPLATE)
 
 
 @app.route("/extract", methods=["POST"])
 def extract():
-    template = request.form.get("template", "")
-    parts = template.split("|")
-    if len(parts) != 2:
-        abort(400, "Malformed template selection.")
-    company, side = parts
-
-    actual_pattern_number = request.form.get("actual_pattern_number", "").strip()
-
-    if actual_pattern_number:
-        # find_field_map tries an exact (company, actual_pattern_number,
-        # side) match first, then falls back to any (company, side)
-        # template -- see its docstring in field_regions.py for why.
-        field_map, is_exact_template = find_field_map(
-            company, actual_pattern_number, side
-        )
-    else:
-        # No pattern number given -- nothing to compare against, so
-        # just use the chosen template directly via its own reference
-        # pattern number. This isn't a "fallback" in the find_field_map
-        # sense (there's no mismatch to report), so it's kept out of
-        # that function's exact/inexact accounting.
-        template_pattern_number = next(
-            (p for c, s, p in _template_choices() if c == company and s == side),
-            None,
-        )
-        field_map, is_exact_template = (
-            find_field_map(company, template_pattern_number, side)
-            if template_pattern_number
-            else (None, False)
-        )
-
-    if field_map is None:
-        abort(404, f"No template available for {company}/{side}.")
-
-    # What to show/log as "the pattern number" -- what the person typed
-    # if they typed one, otherwise fall back to the template's own
-    # reference pattern number so results are never blank there.
-    display_pattern_number = actual_pattern_number or field_map.pattern_number
-
     photo = request.files.get("photo")
     if photo is None or not photo.filename:
         abort(400, "No photo uploaded.")
@@ -239,7 +181,13 @@ def extract():
         image, rotation_applied = apply_detected_rotation(image)
         rotation_source = "detected"
 
-    raw_results = extract_field_map(image, field_map)
+    try:
+        company, side, field_map, raw_results, classify_confidence = auto_classify(image)
+    except ValueError as exc:
+        abort(404, str(exc))
+
+    actual_pattern_number = request.form.get("actual_pattern_number", "").strip()
+    display_pattern_number = actual_pattern_number or field_map.pattern_number
 
     display_results = {}
     confidences = []
@@ -276,7 +224,7 @@ def extract():
         "company": company,
         "pattern_number": display_pattern_number,
         "template_pattern_number": field_map.pattern_number,
-        "is_exact_template": is_exact_template,
+        "classification_confidence": classify_confidence,
         "side": side,
         "image": str(upload_path),
         "rotation_applied_degrees": rotation_applied,
@@ -295,9 +243,8 @@ def extract():
         RESULT_TEMPLATE,
         company=company,
         display_pattern_number=display_pattern_number,
-        template_pattern_number=field_map.pattern_number,
-        is_exact_template=is_exact_template,
         side=side,
+        classify_confidence=f"{classify_confidence:.0f}",
         rotation_applied=rotation_applied,
         rotation_source=rotation_source,
         results=display_results,
