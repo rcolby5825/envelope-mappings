@@ -123,81 +123,132 @@ in which case the banner won't fire even though the result is wrong.
 Worth eyeballing the actual field values, not just the color-coding,
 especially on a photo you haven't tested before.
 
-## Current state (tested against the real Excella E3415 and Pictorial 7117 photos)
+# Envelope Mappings
 
-Rotation confirmed correct: front-cover photos on both envelopes came
-out of the camera landscape with content sideways —
-`cv2.ROTATE_90_CLOCKWISE` before applying the measured fractions is
-right. Excella's back/flap photo needed no rotation; Pictorial's back
-photo DID need it — rotation isn't a fixed per-company constant.
+Python tools for recognizing sewing-pattern envelopes and extracting
+fields from their images. The project has two related parts:
 
-**Rotation is auto-detected**, not passed as a flag. Tesseract's own
-orientation detection (`image_to_osd`) failed when run on the full
-photo directly ("too few characters" — too much blank background
-relative to the small printed area). Cropping first to just the
-envelope's own bounding box (isolated via HSV saturation, since the
-tan paper is more saturated than the gray background) before running
-OSD fixed this: correct on both companies' front and back photos. See
-`extractor.detect_rotation` for the implementation and full reasoning,
-including a secondary edge-density-based bbox method and a
-word-likeness tiebreak that exist to handle photos where the
-saturation approach or raw OSD alone isn't enough (kept as general
-robustness even though neither Excella nor Pictorial's photos actually
-need the fallback path).
+- `src/envelope_mappings/` is the installable package. It provides a
+  two-stage classifier that matches a company logo, then identifies a
+  year or pattern variant with a visual fingerprint.
+- `field_extraction/` is a standalone development harness for measuring
+  field regions and testing OCR against real envelope photos. It is not
+  included in the installed package.
 
-OCR quality by field, after multi-strategy thresholding (see
-`extractor.py`'s `_prep_variants` docstring for the mechanism) and a
-white-border pad before OCR (needed for tight crops like pattern
-numbers, where tesseract badly mangles text touching the crop edge):
+## Installation
 
-| Field | Excella E3415 | Pictorial 7117 |
-|---|---|---|
-| `pattern_number` | Good — "[E3415" (77 conf) | Good — exact "7117" (37 conf) |
-| `price` | Good — "25 Cents" (70 conf) | Good — "45 Cents" (92 conf) |
-| `company_name` | Good — "FXCELLA PATTERNS" (90 conf) | Good — full text (95 conf) |
-| size/measurements | Partial — noisy but usable (~51-71 conf) | Good — (89 conf) |
-| description/instructions | Good — legible, noisy punctuation (~79-87 conf) | n/a (Pictorial's front has no instructions block) |
-| `materials_suitable` | n/a | Good (91 conf) |
+Requires Python 3.9 or newer, OpenCV, NumPy, and Tesseract OCR.
 
-Back/flap fields: Pictorial's back reads well across the board
-(66-95 conf). Excella's back is mostly good except
-`cutting_layout_label`, which is still clipping its right edge —
-flagged in the field's `note`.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
 
-### What fixed it
+Install the Tesseract executable separately if it is not already
+available. On macOS with Homebrew:
 
-1. **Background sliver breaks Otsu.** Any field bbox that clips even a
-   little of the light background beyond the envelope's edge makes
-   Otsu's global threshold flip the *entire* crop to solid black —
-   not a partial-quality problem, a total failure. Several bboxes
-   needed tightening because of this.
-2. **No single threshold strategy works for every field.**
-   `_prep_variants()` in `extractor.py` tries Otsu, adaptive (local)
-   threshold, and inverted Otsu per crop and keeps whichever gives the
-   highest mean OCR confidence. Needed because e.g. Excella's price is
-   printed reversed (light-on-dark), which only the inverted variant
-   handles.
-3. **Text touching the crop edge hurt tesseract badly.** A tight crop
-   with text touching the top/bottom edge gave near-zero confidence
-   and dropped characters. Adding a 30px white border around every
-   binarized variant (also in `_prep_variants()`) fixed this.
-4. **Multi-line fields need PSM 6, not PSM 7.** Any field spanning more
-   than one line needs to be listed in `MULTILINE_FIELDS` in
-   `extractor.py`, or it silently gets single-line OCR mode and reads
-   as noise regardless of image quality. This has bitten more than
-   once when adding a new field — worth double-checking whenever a
-   field is added.
+```bash
+brew install tesseract
+```
 
-### Not yet done
+## Run the tests
 
-- Nothing here has been copied into the real
-  `src/envelope_mappings/templates/excella.py` /
-  `templates/pictorial.py` `FIELD_REGIONS` yet.
-- `cutting_layout_label` on Excella's back still needs its right edge
-  widened slightly.
-- Text quality on the paragraph/table fields is legible but noisy
-  (stray punctuation, occasional misread letters) — fine for a human
-  to read and correct, not yet clean enough to trust unreviewed for
-  structured extraction. `FieldResult.valid`/`confidence` in the real
-  package's extraction mechanism is exactly the mechanism meant to
-  flag that kind of "readable but needs a human glance" result.
+```bash
+python -m pytest
+```
+
+The test suite uses synthetic images to cover classification, logo
+matching, fingerprints, lazy reference paths, and OCR field extraction.
+
+## Package usage
+
+Create `CompanyLogo` and `EnvelopeTemplate` instances with reference
+images, then pass them to `EnvelopeClassifier`:
+
+```python
+import cv2
+
+from envelope_mappings import CompanyLogo, EnvelopeClassifier
+from envelope_mappings.templates.excella import Excella
+
+envelope = cv2.imread("/path/to/envelope.jpg")
+logo_region = cv2.imread("/path/to/logo-crop.jpg")
+
+logo = CompanyLogo("Excella")
+logo.set_reference_path("/path/to/excella-logo.jpg")
+
+template = Excella()
+template.set_reference_path("/path/to/excella-reference.jpg")
+
+classifier = EnvelopeClassifier(logos=[logo], templates=[template])
+result = classifier.classify(envelope, logo_region=logo_region)
+print(result)
+```
+
+Classification returns one of:
+
+- `PatternRecord` when both company and template confidence are high.
+- `AmbiguousMatch` when the template score is between the configured
+  low and high thresholds.
+- `NewTemplateNeeded` when no registered logo or template is a match.
+
+Templates define their own `field_regions` and can override
+`fingerprint()` or `extract_fields()` for envelope-specific behavior.
+Reference images may be assigned before they exist with
+`set_reference_path()`; they are loaded lazily when first used.
+
+## Field-extraction harness
+
+The harness currently includes measured maps for Excella E3415 and
+Pictorial 7117, each with front and back layouts. Run it from the
+repository root after installing the package dependencies:
+
+```bash
+python field_extraction/run_test.py \
+  /path/to/photo.jpg Excella E3415 front
+```
+
+The positional arguments are `image_path company pattern_number side`.
+Rotation is detected automatically; use `--force-rotation 0`, `90`,
+`180`, or `270` for a specific photo when needed.
+
+For a local browser UI, install Flask and start the server:
+
+```bash
+python -m pip install flask
+python field_extraction/webapp.py
+```
+
+Open <http://127.0.0.1:5151>, select an envelope layout, upload a photo,
+and submit it for extraction. Uploaded images go to
+`field_extraction/uploads/`.
+
+## Result storage
+
+By default, CLI and browser runs append JSON Lines to
+`field_extraction/results/results.jsonl`. To use SQLite instead, set:
+
+```bash
+export FIELD_EXTRACTION_DB_PATH="$HOME/envelope-results.db"
+```
+
+The database and scratch uploads/results are ignored by Git.
+
+## Project layout
+
+```text
+proto/                       Protocol Buffer schema
+src/envelope_mappings/       Installable package
+src/envelope_mappings/templates/  Envelope-specific templates
+field_extraction/            OCR measurement and browser harness
+tests/                       Unit tests
+```
+
+## Current scope
+
+The classifier and extraction primitives are implemented and tested.
+The checked-in Excella and Pictorial templates contain field-region
+configuration, while production template-specific extraction remains
+an extension point. The field-extraction harness is the place to
+measure and validate new regions before promoting them into templates.
